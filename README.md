@@ -2,7 +2,7 @@
 
 A conda plugin that verifies [Sigstore](https://www.sigstore.dev/) attestations for packages
 installed from the [`github-releases`](https://prefix.dev/channels/github-releases) channel on
-prefix.dev. This is a proof of concept aimed at showing what how this plugin could work in the
+prefix.dev. This is a proof of concept aimed at showing how this plugin could work in the
 future. It is not intended to be used in production.
 
 When you install a package from that channel, the plugin fetches its Sigstore attestation,
