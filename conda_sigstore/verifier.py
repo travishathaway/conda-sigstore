@@ -48,8 +48,10 @@ Each element is a complete Sigstore bundle JSON object, suitable for
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
@@ -254,6 +256,45 @@ def verify_package(
     raise last_error
 
 
+def _extract_github_workflow_identity(bundle_json: str) -> str | None:
+    """Return the GitHub workflow URI embedded in a Sigstore bundle's certificate.
+
+    Locates the DER-encoded uniformResourceIdentifier (tag 0x86) entries in
+    the X.509 SAN extension and returns the first one that looks like a GitHub
+    Actions workflow URI.  The DER length byte is used to extract exactly the
+    right number of bytes, avoiding false-positive matches from adjacent DER
+    structure bytes.
+
+    Returns ``None`` if the certificate is absent or contains no GitHub URI.
+    """
+    try:
+        bundle = json.loads(bundle_json)
+        cert_b64 = (
+            bundle.get("verificationMaterial", {})
+            .get("certificate", {})
+            .get("rawBytes", "")
+        )
+        if not cert_b64:
+            return None
+        cert_der = base64.b64decode(cert_b64)
+        # 0x86 is the DER tag for uniformResourceIdentifier (context-specific,
+        # primitive, tag number 6). It is followed by a short-form length byte
+        # then the URI bytes.  GitHub workflow URIs are always < 128 bytes so a
+        # single length byte suffices.
+        for m in re.finditer(rb"\x86([\x01-\x7f])", cert_der):
+            length = cert_der[m.start() + 1]
+            uri_bytes = cert_der[m.start() + 2 : m.start() + 2 + length]
+            try:
+                uri = uri_bytes.decode("ascii")
+            except ValueError:
+                continue
+            if uri.startswith("https://github.com/") and "@refs/" in uri:
+                return uri
+        return None
+    except Exception:
+        return None
+
+
 def _get_cache_record(rec: PackageRecord) -> PackageCacheRecord:
     """Look up the local :class:`~conda.models.records.PackageCacheRecord` for
     *rec*.
@@ -339,17 +380,9 @@ class SigstoreVerificationAction(Action):
             Channel.from_url(ch).base_url for ch in plugins.sigstore_trusted_channels
         }
 
-        # Build the verifier once — the embedded GHA root requires no network
-        # call and is correct for all packages on trusted channels.
-        verifier = Verifier.github()
-
-        # Build the Identity policy.  When identity_str is None we pass an
-        # empty string as a sentinel; py_sigstore treats this as "any identity"
-        # when only issuer matching matters.
-        policy = Identity(
-            identity=identity_str or "",
-            issuer=issuer_str,
-        )
+        # Build the verifier once using the production Sigstore TUF root, which
+        # is always up to date (including TSA certs) unlike the embedded root.
+        verifier = Verifier.production()
 
         trusted_recs: list[PackageRecord] = [
             rec
@@ -409,6 +442,15 @@ class SigstoreVerificationAction(Action):
                 return CondaVerificationError(
                     f"Could not read cached package {cache_rec.package_tarball_full_path!r}: {exc}"
                 )
+
+            # --- Build per-package Identity policy ----------------------------
+            # When sigstore_identity is not configured, extract the actual
+            # signer identity from the first bundle's certificate so that any
+            # GitHub Actions-signed package passes (issuer-only matching).
+            effective_identity = identity_str or _extract_github_workflow_identity(
+                bundle_jsons[0]
+            )
+            policy = Identity(identity=effective_identity or "", issuer=issuer_str)
 
             # --- Verify -------------------------------------------------------
             try:

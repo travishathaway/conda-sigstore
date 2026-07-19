@@ -76,7 +76,9 @@ SIGSTORE_SETTINGS = [
             "  sigstore_trusted_channels:\n"
             "    - https://prefix.dev/github-releases"
         ),
-        parameter=SequenceParameter(element_type=str, default=[]),
+        parameter=SequenceParameter(
+            PrimitiveParameter("", element_type=str), default=[]
+        ),
     ),
 ]
 

@@ -415,7 +415,7 @@ class TestSigstoreVerificationAction:
 
         assert result is None
         assert action._verified is True
-        MockVerifier.github.return_value.verify_dsse.assert_not_called()
+        MockVerifier.production.return_value.verify_dsse.assert_not_called()
 
     def test_skips_when_trusted_channels_empty(self):
         rec = _make_record(GITHUB_RELEASES_URL)
@@ -427,7 +427,7 @@ class TestSigstoreVerificationAction:
 
         assert result is None
         assert action._verified is True
-        MockVerifier.github.return_value.verify_dsse.assert_not_called()
+        MockVerifier.production.return_value.verify_dsse.assert_not_called()
 
     def test_skips_when_no_link_precs(self):
         action = self._make_action(link_precs=[])

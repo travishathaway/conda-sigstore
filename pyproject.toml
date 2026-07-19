@@ -45,6 +45,7 @@ pyupgrade = "*"
 pytest = "*"
 pytest-cov = "*"
 pytest-mock = "*"
+pytest-benchmark = "*"
 prek = "*"
 
 [tool.pixi.pypi-dependencies]
