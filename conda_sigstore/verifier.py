@@ -57,6 +57,8 @@ from conda.exceptions import CondaVerificationError
 from conda.gateways.connection.session import get_session
 from py_sigstore import Bundle, Identity, VerificationError, Verifier
 
+from .constants import ATTESTATION_FILE_SUFFIX
+
 if TYPE_CHECKING:
     from conda.models.records import PackageCacheRecord, PackageRecord
 
@@ -70,11 +72,6 @@ GITHUB_RELEASES_CHANNEL = "https://prefix.dev/github-releases"
 class AttestationFetchError(Exception):
     """Raised when the ``.v0.sigs`` endpoint cannot be reached or returns an
     unexpected HTTP status code."""
-
-
-# ---------------------------------------------------------------------------
-# Public helpers (tested independently)
-# ---------------------------------------------------------------------------
 
 
 def is_github_releases_package(rec: PackageRecord) -> bool:
@@ -112,7 +109,7 @@ def fetch_attestation_bundles(package_url: str) -> list[str]:
         :class:`AttestationFetchError`: If the HTTP request fails (e.g. 404,
             connection error, or the response body is not valid JSON).
     """
-    sigs_url = package_url + ".v0.sigs"
+    sigs_url = f"{package_url}.{ATTESTATION_FILE_SUFFIX}"
     log.debug("Fetching attestation from %s", sigs_url)
 
     session = get_session(sigs_url)

@@ -16,8 +16,7 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: Implementation :: CPython",
 ]
-dependencies = [
-]
+dependencies = []
 
 [project.entry-points.conda]
 conda-sigstore = "conda_sigstore.hooks"
@@ -36,6 +35,7 @@ dev = { features = ["dev"], solve-group = "default" }
 [tool.pixi.dependencies]
 conda = ">=26.5.0"
 py-sigstore = ">=0.11.0,<0.12"
+platformdirs = ">=4.10.1,<5"
 
 [tool.pixi.feature.dev.dependencies]
 darker = "*"

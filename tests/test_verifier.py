@@ -292,6 +292,7 @@ class TestSigstoreVerificationAction:
         """Context manager that patches ``conda.base.context.context.plugins``."""
         mock_ctx = MagicMock()
         mock_ctx.plugins = self._plugins_ns
+        mock_ctx.fetch_threads = 5
         return patch("conda_sigstore.verifier.context", mock_ctx)
 
     # --- Packages from other channels are skipped ---------------------------
