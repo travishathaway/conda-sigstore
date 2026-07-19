@@ -35,3 +35,7 @@ because these files don't change. Next steps are implementing a cache to store t
 Additionally, I'm also going to add a new setting to expose a list of trusted channels. This
 will replace the `is_github_releases_package` function and make channel verification more
 flexible.
+
+### Later that day...
+
+I implemented the above changes and there's now a working demo as a conda plugin.
