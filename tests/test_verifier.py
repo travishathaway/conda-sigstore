@@ -325,7 +325,7 @@ class TestSigstoreVerificationAction:
 
         with self._patch_context():
             with patch(
-                "conda_sigstore.verifier.fetch_attestation_bundles"
+                "conda_sigstore.verifier.fetch_and_cache_attestation_bundles"
             ) as mock_fetch:
                 mock_fetch.return_value = [SAMPLE_BUNDLE_JSON]
                 with patch("conda_sigstore.verifier._get_cache_record") as mock_cache:
@@ -359,7 +359,7 @@ class TestSigstoreVerificationAction:
 
         with self._patch_context():
             with patch(
-                "conda_sigstore.verifier.fetch_attestation_bundles",
+                "conda_sigstore.verifier.fetch_and_cache_attestation_bundles",
                 side_effect=AttestationFetchError("HTTP 404"),
             ):
                 result = action.verify()
@@ -375,7 +375,7 @@ class TestSigstoreVerificationAction:
 
         with self._patch_context():
             with patch(
-                "conda_sigstore.verifier.fetch_attestation_bundles",
+                "conda_sigstore.verifier.fetch_and_cache_attestation_bundles",
                 return_value=[],
             ):
                 result = action.verify()
@@ -392,7 +392,7 @@ class TestSigstoreVerificationAction:
 
         with self._patch_context():
             with patch(
-                "conda_sigstore.verifier.fetch_attestation_bundles",
+                "conda_sigstore.verifier.fetch_and_cache_attestation_bundles",
                 side_effect=AttestationFetchError("HTTP 404"),
             ):
                 result = action.verify()
@@ -406,7 +406,7 @@ class TestSigstoreVerificationAction:
 
         with self._patch_context():
             with patch(
-                "conda_sigstore.verifier.fetch_attestation_bundles",
+                "conda_sigstore.verifier.fetch_and_cache_attestation_bundles",
                 return_value=[],
             ):
                 result = action.verify()
@@ -424,7 +424,7 @@ class TestSigstoreVerificationAction:
 
         with self._patch_context():
             with patch(
-                "conda_sigstore.verifier.fetch_attestation_bundles",
+                "conda_sigstore.verifier.fetch_and_cache_attestation_bundles",
                 return_value=[SAMPLE_BUNDLE_JSON],
             ):
                 with patch(
@@ -464,7 +464,7 @@ class TestSigstoreVerificationAction:
 
         with self._patch_context():
             with patch(
-                "conda_sigstore.verifier.fetch_attestation_bundles",
+                "conda_sigstore.verifier.fetch_and_cache_attestation_bundles",
                 return_value=[SAMPLE_BUNDLE_JSON],
             ) as mock_fetch:
                 with patch(

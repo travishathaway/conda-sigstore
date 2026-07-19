@@ -57,6 +57,7 @@ from conda.exceptions import CondaVerificationError
 from conda.gateways.connection.session import get_session
 from py_sigstore import Bundle, Identity, VerificationError, Verifier
 
+from .cache import fetch_and_cache_attestation_bundles
 from .constants import ATTESTATION_FILE_SUFFIX
 
 if TYPE_CHECKING:
@@ -109,7 +110,7 @@ def fetch_attestation_bundles(package_url: str) -> list[str]:
         :class:`AttestationFetchError`: If the HTTP request fails (e.g. 404,
             connection error, or the response body is not valid JSON).
     """
-    sigs_url = f"{package_url}.{ATTESTATION_FILE_SUFFIX}"
+    sigs_url = f"{package_url}{ATTESTATION_FILE_SUFFIX}"
     log.debug("Fetching attestation from %s", sigs_url)
 
     session = get_session(sigs_url)
@@ -294,7 +295,7 @@ class SigstoreVerificationAction(Action):
         with ThreadPoolExecutor(max_workers=context.fetch_threads) as executor:
             for rec in github_recs:
                 log.info("Fetching Sigstore attestation for %s", rec.fn)
-                fetch_futures[executor.submit(fetch_attestation_bundles, rec.url)] = rec
+                fetch_futures[executor.submit(fetch_and_cache_attestation_bundles, rec.url)] = rec
 
         # --- Sequential verify phase -----------------------------------------
         # All fetches are complete; process results in submission order so that
