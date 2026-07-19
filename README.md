@@ -1,8 +1,11 @@
 # conda-sigstore
 
 A conda plugin that verifies [Sigstore](https://www.sigstore.dev/) attestations for packages
-installed from user-configured trusted channels. This is a proof of concept aimed at showing how
-this plugin could work in the future. It is not intended to be used in production.
+installed from user-configured trusted channels.
+
+> [!WARNING]
+> This is a proof of concept aimed at showing how this plugin could work in the future.
+> It is not intended to be used in production.
 
 When you install a package from a trusted channel, the plugin fetches its Sigstore attestation,
 verifies the cryptographic signature against the downloaded archive, cross-checks the in-toto
