@@ -3,8 +3,9 @@ Core Sigstore verification logic for conda-sigstore.
 
 This module provides:
 
-- :func:`is_github_releases_package` — detect packages from the target channel
 - :func:`fetch_attestation_bundles` — download ``.v0.sigs`` attestation data
+- :func:`verify_in_toto_statement` — cross-check the in-toto payload against
+  the actual package metadata (CEP-0027)
 - :func:`verify_package` — verify a package file against one or more bundles
 - :class:`SigstoreVerificationAction` — conda pre-transaction action that ties
   the above together and is registered via the ``conda_pre_transaction_actions``
@@ -16,19 +17,21 @@ Verification flow
     ``ProgressiveFetchExtract``).
 2.  ``SigstoreVerificationAction.verify()`` is called before any file is linked
     into the target prefix.
-3.  For every package whose URL belongs to the github-releases channel the
-    action:
+3.  For every package whose channel URL appears in ``sigstore_trusted_channels``
+    the action:
 
     a. Fetches ``<package-url>.v0.sigs`` — a JSON array of Sigstore bundles.
     b. Reads the local archive bytes from the package cache.
     c. Calls ``Verifier.verify_dsse()`` (the bundles are GitHub Actions DSSE
        bundles containing an in-toto statement).
-    d. Returns a :class:`CondaVerificationError` to conda if *all* bundles fail
+    d. Cross-checks the in-toto statement against the package record per
+       CEP-0027 (filename, SHA-256, targetChannel).
+    e. Returns a :class:`CondaVerificationError` to conda if *all* bundles fail
        to verify, which aborts the transaction before anything is installed.
 
 Bundle format
 -------------
-``https://prefix.dev/github-releases/<subdir>/<pkg>.conda.v0.sigs`` returns::
+A ``.v0.sigs`` URL returns::
 
     [
       {
@@ -50,11 +53,14 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
+import hashlib
+
 import requests.exceptions
 from conda.base.context import context
 from conda.core.path_actions import Action
 from conda.exceptions import CondaVerificationError
 from conda.gateways.connection.session import get_session
+from conda.models.channel import Channel
 from py_sigstore import Bundle, Identity, VerificationError, Verifier
 
 from .cache import fetch_and_cache_attestation_bundles
@@ -65,31 +71,13 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-#: Base URL prefix for the target channel.  Only packages whose download URL
-#: starts with this string will be checked.
-GITHUB_RELEASES_CHANNEL = "https://prefix.dev/github-releases"
+#: Predicate type required in in-toto statements per CEP-0027.
+CONDA_PREDICATE_TYPE = "https://schemas.conda.org/attestations-publish-1.schema.json"
 
 
 class AttestationFetchError(Exception):
     """Raised when the ``.v0.sigs`` endpoint cannot be reached or returns an
     unexpected HTTP status code."""
-
-
-def is_github_releases_package(rec: PackageRecord) -> bool:
-    """Return *True* if *rec* was resolved from the github-releases channel.
-
-    The check is a URL prefix match so it works regardless of platform subdir
-    or package filename.
-
-    Args:
-        rec: A :class:`~conda.models.records.PackageRecord` as supplied by
-             conda's transaction machinery.
-
-    Returns:
-        ``True`` when the package URL starts with
-        :data:`GITHUB_RELEASES_CHANNEL`, ``False`` otherwise.
-    """
-    return bool(rec.url and rec.url.startswith(GITHUB_RELEASES_CHANNEL + "/"))
 
 
 def fetch_attestation_bundles(package_url: str) -> list[str]:
@@ -143,17 +131,90 @@ def fetch_attestation_bundles(package_url: str) -> list[str]:
     return [json.dumps(bundle) for bundle in bundles]
 
 
+def verify_in_toto_statement(
+    payload: bytes,
+    expected_filename: str,
+    expected_channel: str,
+    artifact_bytes: bytes,
+) -> None:
+    """Validate an in-toto statement payload against the actual package metadata.
+
+    Performs the cross-checks required by CEP-0027 after Sigstore cryptographic
+    verification:
+
+    - ``predicateType`` must be :data:`CONDA_PREDICATE_TYPE`.
+    - ``subject`` must contain exactly one entry whose ``name`` matches
+      *expected_filename*.
+    - The subject ``digest.sha256`` must match the SHA-256 of *artifact_bytes*.
+    - ``predicate.targetChannel`` must match *expected_channel* (channel from
+      which the package was downloaded).
+
+    Args:
+        payload: Raw bytes of the decoded in-toto statement JSON (as returned
+            by :meth:`~py_sigstore.Verifier.verify_dsse`).
+        expected_filename: The package filename (e.g. ``foo-1.0-h0.conda``).
+        expected_channel: The channel base URL the package was retrieved from
+            (e.g. ``https://prefix.dev/github-releases``), without trailing
+            slash.
+        artifact_bytes: Raw bytes of the package archive for digest comparison.
+
+    Raises:
+        :class:`~py_sigstore.VerificationError`: If any check fails.
+    """
+    stmt = json.loads(payload)
+
+    predicate_type = stmt.get("predicateType")
+    if predicate_type != CONDA_PREDICATE_TYPE:
+        raise VerificationError(
+            f"Unexpected predicateType {predicate_type!r}; "
+            f"expected {CONDA_PREDICATE_TYPE!r}"
+        )
+
+    subjects = stmt.get("subject", [])
+    if len(subjects) != 1:
+        raise VerificationError(
+            f"Expected exactly 1 subject in in-toto statement, got {len(subjects)}"
+        )
+
+    subject = subjects[0]
+    bundle_name = subject.get("name")
+    if bundle_name != expected_filename:
+        raise VerificationError(
+            f"Bundle subject name {bundle_name!r} != package filename {expected_filename!r}"
+        )
+
+    actual_sha256 = hashlib.sha256(artifact_bytes).hexdigest()
+    bundle_sha256 = subject.get("digest", {}).get("sha256", "")
+    if actual_sha256 != bundle_sha256:
+        raise VerificationError(
+            f"SHA-256 mismatch: bundle has {bundle_sha256!r}, "
+            f"local file computes {actual_sha256!r}"
+        )
+
+    target_channel = stmt.get("predicate", {}).get("targetChannel", "").rstrip("/")
+    if target_channel != expected_channel.rstrip("/"):
+        raise VerificationError(
+            f"Bundle targetChannel {target_channel!r} != "
+            f"download channel {expected_channel!r}"
+        )
+
+
 def verify_package(
     verifier: Verifier,
     artifact_bytes: bytes,
     bundle_jsons: list[str],
     policy: Identity,
+    expected_filename: str,
+    expected_channel: str,
 ) -> None:
     """Verify *artifact_bytes* against at least one of the provided bundles.
 
     Iterates over *bundle_jsons* and calls
-    :meth:`~py_sigstore.Verifier.verify_dsse` for each.  Succeeds (returns
-    ``None``) as soon as *any* bundle verifies successfully.  Raises
+    :meth:`~py_sigstore.Verifier.verify_dsse` for each.  For each bundle that
+    passes Sigstore verification, also cross-checks the in-toto statement
+    against the package metadata per CEP-0027 via
+    :func:`verify_in_toto_statement`.  Succeeds (returns ``None``) as soon as
+    *any* bundle passes both checks.  Raises
     :class:`~py_sigstore.VerificationError` only if *every* bundle fails.
 
     Args:
@@ -161,6 +222,8 @@ def verify_package(
         artifact_bytes: Raw bytes of the package archive.
         bundle_jsons: Non-empty list of Sigstore bundle JSON strings.
         policy: The :class:`~py_sigstore.Identity` the signer must match.
+        expected_filename: Package filename for in-toto subject name check.
+        expected_channel: Channel base URL for in-toto targetChannel check.
 
     Raises:
         :class:`~py_sigstore.VerificationError`: If all bundles fail
@@ -176,7 +239,10 @@ def verify_package(
     for bundle_json in bundle_jsons:
         bundle = Bundle.from_json(bundle_json)
         try:
-            verifier.verify_dsse(artifact_bytes, bundle, policy)
+            _, payload = verifier.verify_dsse(artifact_bytes, bundle, policy)
+            verify_in_toto_statement(
+                payload, expected_filename, expected_channel, artifact_bytes
+            )
             log.debug("Sigstore verification succeeded")
             return  # success — no need to check remaining bundles
         except VerificationError as exc:
@@ -243,10 +309,14 @@ class SigstoreVerificationAction(Action):
     ``sigstore_on_missing``
         ``"block"`` (default) or ``"warn"``.  Controls behaviour when a
         package has no attestation.
+
+    ``sigstore_trusted_channels``
+        List of channel base URLs to verify.  Only packages from these
+        channels are checked.  Empty list disables verification.
     """
 
     def verify(self) -> Exception | None:
-        """Run Sigstore verification for all github-releases packages.
+        """Run Sigstore verification for all packages from trusted channels.
 
         Attestation bundles are fetched in parallel using a
         :class:`~concurrent.futures.ThreadPoolExecutor` sized by
@@ -265,8 +335,12 @@ class SigstoreVerificationAction(Action):
         issuer_str: str | None = plugins.sigstore_issuer
         on_missing: str = plugins.sigstore_on_missing
 
+        trusted: set[str | None] = {
+            Channel.from_url(ch).base_url for ch in plugins.sigstore_trusted_channels
+        }
+
         # Build the verifier once — the embedded GHA root requires no network
-        # call and is correct for all packages on the github-releases channel.
+        # call and is correct for all packages on trusted channels.
         verifier = Verifier.github()
 
         # Build the Identity policy.  When identity_str is None we pass an
@@ -277,11 +351,13 @@ class SigstoreVerificationAction(Action):
             issuer=issuer_str,
         )
 
-        github_recs: list[PackageRecord] = [
-            rec for rec in (self.link_precs or []) if is_github_releases_package(rec)
+        trusted_recs: list[PackageRecord] = [
+            rec
+            for rec in (self.link_precs or [])
+            if rec.url and Channel.from_url(rec.url).base_url in trusted
         ]
 
-        if not github_recs:
+        if not trusted_recs:
             self._verified = True
             return None
 
@@ -293,7 +369,7 @@ class SigstoreVerificationAction(Action):
         # instance automatically — no locking required.
         fetch_futures: dict = {}
         with ThreadPoolExecutor(max_workers=context.fetch_threads) as executor:
-            for rec in github_recs:
+            for rec in trusted_recs:
                 log.info("Fetching Sigstore attestation for %s", rec.fn)
                 fetch_futures[executor.submit(fetch_and_cache_attestation_bundles, rec.url)] = rec
 
@@ -336,7 +412,14 @@ class SigstoreVerificationAction(Action):
 
             # --- Verify -------------------------------------------------------
             try:
-                verify_package(verifier, artifact_bytes, bundle_jsons, policy)
+                verify_package(
+                    verifier,
+                    artifact_bytes,
+                    bundle_jsons,
+                    policy,
+                    expected_filename=rec.fn,
+                    expected_channel=Channel.from_url(rec.url).base_url or "",
+                )
             except VerificationError as exc:
                 return CondaVerificationError(
                     f"Sigstore verification failed for {rec.fn!r}: {exc}"

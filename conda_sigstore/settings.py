@@ -15,7 +15,7 @@ They can also be set via environment variables with the ``CONDA_PLUGINS_`` prefi
 
 from __future__ import annotations
 
-from conda.common.configuration import PrimitiveParameter
+from conda.common.configuration import PrimitiveParameter, SequenceParameter
 from conda.plugins import hookimpl
 from conda.plugins.types import CondaSetting
 
@@ -56,7 +56,7 @@ SIGSTORE_SETTINGS = [
     CondaSetting(
         name="sigstore_on_missing",
         description=(
-            "What to do when a package from the github-releases channel has no "
+            "What to do when a package from a trusted channel has no "
             "Sigstore attestation. "
             "'block' (default): abort the installation. "
             "'warn': log a warning and continue."
@@ -66,6 +66,17 @@ SIGSTORE_SETTINGS = [
             element_type=str,
             validation=_validate_on_missing,
         ),
+    ),
+    CondaSetting(
+        name="sigstore_trusted_channels",
+        description=(
+            "List of channel base URLs for which Sigstore attestations are required. "
+            "Only packages downloaded from these channels will be verified. "
+            "Example:\n"
+            "  sigstore_trusted_channels:\n"
+            "    - https://prefix.dev/github-releases"
+        ),
+        parameter=SequenceParameter(element_type=str, default=[]),
     ),
 ]
 

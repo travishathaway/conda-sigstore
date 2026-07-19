@@ -21,11 +21,11 @@ import pytest
 import requests.exceptions
 
 from conda_sigstore.verifier import (
-    GITHUB_RELEASES_CHANNEL,
+    CONDA_PREDICATE_TYPE,
     AttestationFetchError,
     SigstoreVerificationAction,
     fetch_attestation_bundles,
-    is_github_releases_package,
+    verify_in_toto_statement,
     verify_package,
 )
 
@@ -49,6 +49,7 @@ SAMPLE_BUNDLE_OBJ: dict[str, Any] = {
 
 SAMPLE_BUNDLE_JSON = json.dumps(SAMPLE_BUNDLE_OBJ)
 
+GITHUB_RELEASES_CHANNEL = "https://prefix.dev/github-releases"
 GITHUB_RELEASES_URL = f"{GITHUB_RELEASES_CHANNEL}/linux-64/7zip-25.00-hb0f4dca_0.conda"
 CONDA_FORGE_URL = (
     "https://conda.anaconda.org/conda-forge/linux-64/numpy-1.25.0-py311h.conda"
@@ -74,46 +75,17 @@ def _make_context_plugins(
     identity: str | None = None,
     issuer: str | None = "https://token.actions.githubusercontent.com",
     on_missing: str = "block",
+    trusted_channels: list[str] | None = None,
 ) -> SimpleNamespace:
     """Return a mock ``context.plugins`` namespace."""
     return SimpleNamespace(
         sigstore_identity=identity,
         sigstore_issuer=issuer,
         sigstore_on_missing=on_missing,
+        sigstore_trusted_channels=trusted_channels
+        if trusted_channels is not None
+        else [GITHUB_RELEASES_CHANNEL],
     )
-
-
-# ---------------------------------------------------------------------------
-# Tests: is_github_releases_package
-# ---------------------------------------------------------------------------
-
-
-class TestIsGithubReleasesPackage:
-    def test_matching_url(self):
-        rec = _make_record(GITHUB_RELEASES_URL)
-        assert is_github_releases_package(rec) is True
-
-    def test_non_matching_url(self):
-        rec = _make_record(CONDA_FORGE_URL)
-        assert is_github_releases_package(rec) is False
-
-    def test_none_url(self):
-        rec = _make_record(None)
-        assert is_github_releases_package(rec) is False
-
-    def test_empty_url(self):
-        rec = _make_record("")
-        assert is_github_releases_package(rec) is False
-
-    def test_partial_prefix_not_matched(self):
-        # Must have a "/" after the channel name — a bare prefix match
-        # should not fire if the URL is exactly the channel base.
-        rec = _make_record(GITHUB_RELEASES_CHANNEL)
-        assert is_github_releases_package(rec) is False
-
-    def test_different_subdir(self):
-        rec = _make_record(f"{GITHUB_RELEASES_CHANNEL}/osx-arm64/foo-1.0-h0.conda")
-        assert is_github_releases_package(rec) is True
 
 
 # ---------------------------------------------------------------------------
@@ -213,26 +185,146 @@ class TestFetchAttestationBundles:
 # ---------------------------------------------------------------------------
 
 
+def _good_in_toto_payload(
+    filename: str = "pkg-1.0-h0.conda",
+    channel: str = GITHUB_RELEASES_CHANNEL,
+    artifact_bytes: bytes = b"bytes",
+) -> bytes:
+    """Build a minimal valid in-toto statement payload for the given args."""
+    import hashlib
+
+    sha256 = hashlib.sha256(artifact_bytes).hexdigest()
+    stmt = {
+        "predicateType": CONDA_PREDICATE_TYPE,
+        "subject": [{"name": filename, "digest": {"sha256": sha256}}],
+        "predicate": {"targetChannel": channel},
+    }
+    return json.dumps(stmt).encode()
+
+
+class TestVerifyInTotoStatement:
+    def _make_payload(self, **kwargs) -> bytes:
+        return _good_in_toto_payload(**kwargs)
+
+    def test_passes_for_valid_statement(self):
+        payload = self._make_payload()
+        verify_in_toto_statement(
+            payload,
+            expected_filename="pkg-1.0-h0.conda",
+            expected_channel=GITHUB_RELEASES_CHANNEL,
+            artifact_bytes=b"bytes",
+        )
+
+    def test_fails_wrong_predicate_type(self):
+        from py_sigstore import VerificationError
+
+        stmt = json.loads(self._make_payload())
+        stmt["predicateType"] = "https://example.com/wrong"
+        with pytest.raises(VerificationError, match="predicateType"):
+            verify_in_toto_statement(
+                json.dumps(stmt).encode(),
+                "pkg-1.0-h0.conda",
+                GITHUB_RELEASES_CHANNEL,
+                b"bytes",
+            )
+
+    def test_fails_wrong_subject_count(self):
+        from py_sigstore import VerificationError
+
+        stmt = json.loads(self._make_payload())
+        stmt["subject"] = []
+        with pytest.raises(VerificationError, match="exactly 1 subject"):
+            verify_in_toto_statement(
+                json.dumps(stmt).encode(),
+                "pkg-1.0-h0.conda",
+                GITHUB_RELEASES_CHANNEL,
+                b"bytes",
+            )
+
+    def test_fails_wrong_subject_name(self):
+        from py_sigstore import VerificationError
+
+        payload = self._make_payload(filename="different-1.0-h0.conda")
+        with pytest.raises(VerificationError, match="subject name"):
+            verify_in_toto_statement(
+                payload,
+                "pkg-1.0-h0.conda",
+                GITHUB_RELEASES_CHANNEL,
+                b"bytes",
+            )
+
+    def test_fails_sha256_mismatch(self):
+        from py_sigstore import VerificationError
+
+        payload = self._make_payload(artifact_bytes=b"other bytes")
+        with pytest.raises(VerificationError, match="SHA-256"):
+            verify_in_toto_statement(
+                payload,
+                "pkg-1.0-h0.conda",
+                GITHUB_RELEASES_CHANNEL,
+                b"bytes",  # different from what payload was built with
+            )
+
+    def test_fails_wrong_target_channel(self):
+        from py_sigstore import VerificationError
+
+        payload = self._make_payload(channel="https://prefix.dev/other-channel")
+        with pytest.raises(VerificationError, match="targetChannel"):
+            verify_in_toto_statement(
+                payload,
+                "pkg-1.0-h0.conda",
+                GITHUB_RELEASES_CHANNEL,
+                b"bytes",
+            )
+
+    def test_channel_trailing_slash_ignored(self):
+        payload = self._make_payload(channel=GITHUB_RELEASES_CHANNEL + "/")
+        verify_in_toto_statement(
+            payload,
+            "pkg-1.0-h0.conda",
+            GITHUB_RELEASES_CHANNEL,
+            b"bytes",
+        )
+
+
 class TestVerifyPackage:
+    def _make_verify_package_args(
+        self,
+        filename: str = "pkg-1.0-h0.conda",
+        channel: str = GITHUB_RELEASES_CHANNEL,
+    ):
+        return dict(
+            expected_filename=filename,
+            expected_channel=channel,
+        )
+
     def test_succeeds_when_first_bundle_passes(self):
         verifier = Mock()
-        verifier.verify_dsse.return_value = ("application/vnd.in-toto+json", b"{}")
+        payload = _good_in_toto_payload()
+        verifier.verify_dsse.return_value = ("application/vnd.in-toto+json", payload)
         bundle_mock = Mock()
         policy = Mock()
 
         with patch("conda_sigstore.verifier.Bundle") as BundleCls:
             BundleCls.from_json.return_value = bundle_mock
-            verify_package(verifier, b"bytes", [SAMPLE_BUNDLE_JSON], policy)
+            verify_package(
+                verifier,
+                b"bytes",
+                [SAMPLE_BUNDLE_JSON],
+                policy,
+                **self._make_verify_package_args(),
+            )
 
         verifier.verify_dsse.assert_called_once_with(b"bytes", bundle_mock, policy)
 
     def test_tries_second_bundle_if_first_fails(self):
         from py_sigstore import VerificationError
 
+        payload = _good_in_toto_payload()
         verifier = Mock()
         verifier.verify_dsse.side_effect = [
             VerificationError("bad sig"),
-            ("application/vnd.in-toto+json", b"{}"),
+            ("application/vnd.in-toto+json", payload),
         ]
 
         with patch("conda_sigstore.verifier.Bundle") as BundleCls:
@@ -242,6 +334,7 @@ class TestVerifyPackage:
                 b"bytes",
                 [SAMPLE_BUNDLE_JSON, SAMPLE_BUNDLE_JSON],
                 policy=Mock(),
+                **self._make_verify_package_args(),
             )
 
         assert verifier.verify_dsse.call_count == 2
@@ -255,12 +348,24 @@ class TestVerifyPackage:
         with patch("conda_sigstore.verifier.Bundle") as BundleCls:
             BundleCls.from_json.return_value = Mock()
             with pytest.raises(VerificationError):
-                verify_package(verifier, b"bytes", [SAMPLE_BUNDLE_JSON], policy=Mock())
+                verify_package(
+                    verifier,
+                    b"bytes",
+                    [SAMPLE_BUNDLE_JSON],
+                    policy=Mock(),
+                    **self._make_verify_package_args(),
+                )
 
     def test_raises_value_error_for_empty_bundle_list(self):
         verifier = Mock()
         with pytest.raises(ValueError, match="must not be empty"):
-            verify_package(verifier, b"bytes", [], policy=Mock())
+            verify_package(
+                verifier,
+                b"bytes",
+                [],
+                policy=Mock(),
+                **self._make_verify_package_args(),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +382,7 @@ class TestSigstoreVerificationAction:
         identity: str | None = None,
         issuer: str | None = "https://token.actions.githubusercontent.com",
         on_missing: str = "block",
+        trusted_channels: list[str] | None = None,
     ) -> SigstoreVerificationAction:
         action = SigstoreVerificationAction(
             transaction_context={},
@@ -284,7 +390,9 @@ class TestSigstoreVerificationAction:
             unlink_precs=[],
             link_precs=link_precs or [],
         )
-        plugins_ns = _make_context_plugins(identity, issuer, on_missing)
+        plugins_ns = _make_context_plugins(
+            identity, issuer, on_missing, trusted_channels
+        )
         self._plugins_ns = plugins_ns
         return action
 
@@ -297,7 +405,7 @@ class TestSigstoreVerificationAction:
 
     # --- Packages from other channels are skipped ---------------------------
 
-    def test_skips_non_github_releases_packages(self):
+    def test_skips_packages_not_in_trusted_channels(self):
         rec = _make_record(CONDA_FORGE_URL, fn="numpy-1.25.0-py311h.conda")
         action = self._make_action(link_precs=[rec])
 
@@ -307,7 +415,18 @@ class TestSigstoreVerificationAction:
 
         assert result is None
         assert action._verified is True
-        # Verifier should never be called if no github-releases packages exist
+        MockVerifier.github.return_value.verify_dsse.assert_not_called()
+
+    def test_skips_when_trusted_channels_empty(self):
+        rec = _make_record(GITHUB_RELEASES_URL)
+        action = self._make_action(link_precs=[rec], trusted_channels=[])
+
+        with self._patch_context():
+            with patch("conda_sigstore.verifier.Verifier") as MockVerifier:
+                result = action.verify()
+
+        assert result is None
+        assert action._verified is True
         MockVerifier.github.return_value.verify_dsse.assert_not_called()
 
     def test_skips_when_no_link_precs(self):
@@ -455,7 +574,7 @@ class TestSigstoreVerificationAction:
     # --- Parallel fetch -------------------------------------------------------
 
     def test_all_packages_fetched_in_parallel(self):
-        """All github-releases packages have their attestations fetched."""
+        """All packages from trusted channels have their attestations fetched."""
         recs = [
             _make_record(GITHUB_RELEASES_URL, fn=f"pkg-{i}-1.0-h0.conda")
             for i in range(3)
@@ -512,13 +631,18 @@ class TestSigstoreVerificationAction:
 
 
 class TestHooksRegistration:
-    def test_conda_settings_yields_three_settings(self):
+    def test_conda_settings_yields_four_settings(self):
         from conda_sigstore.hooks import conda_settings
 
         results = list(conda_settings())
-        assert len(results) == 3
+        assert len(results) == 4
         names = {s.name for s in results}
-        assert names == {"sigstore_identity", "sigstore_issuer", "sigstore_on_missing"}
+        assert names == {
+            "sigstore_identity",
+            "sigstore_issuer",
+            "sigstore_on_missing",
+            "sigstore_trusted_channels",
+        }
 
     def test_conda_pre_transaction_actions_yields_action(self):
         from conda_sigstore.hooks import conda_pre_transaction_actions

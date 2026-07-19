@@ -1,19 +1,20 @@
 # conda-sigstore
 
 A conda plugin that verifies [Sigstore](https://www.sigstore.dev/) attestations for packages
-installed from the [`github-releases`](https://prefix.dev/channels/github-releases) channel on
-prefix.dev. This is a proof of concept aimed at showing how this plugin could work in the
-future. It is not intended to be used in production.
+installed from user-configured trusted channels. This is a proof of concept aimed at showing how
+this plugin could work in the future. It is not intended to be used in production.
 
-When you install a package from that channel, the plugin fetches its Sigstore attestation,
-verifies the cryptographic signature against the downloaded archive, and aborts the installation
-if verification fails — before any files are written to your environment.
+When you install a package from a trusted channel, the plugin fetches its Sigstore attestation,
+verifies the cryptographic signature against the downloaded archive, cross-checks the in-toto
+statement inside the attestation bundle against the package metadata (filename, SHA-256 digest,
+and target channel per [CEP-0027](https://conda.org/learn/ceps/cep-0027)), and aborts the
+installation if any check fails — before any files are written to your environment.
 
 ## Requirements
 
 - conda >= 26.5.0
 - Python >= 3.11
-- osx-arm64 platform (the `py-sigstore` dependency is currently only published for that
+- osx-arm64/linux-aarch64 platform (the `py-sigstore` dependency is currently only published for that
   architecture)
 
 ## Installation
@@ -35,7 +36,7 @@ it for all subsequent install, update, and create operations.
 The plugin uses the `conda_pre_transaction_actions` hook, which runs **after** packages are
 downloaded to the local cache but **before** any files are linked into the target environment.
 
-For every package being installed whose URL belongs to `https://prefix.dev/github-releases`,
+For every package being installed whose channel appears in `sigstore_trusted_channels`,
 the plugin:
 
 1. **Fetches the attestation** by appending `.v0.sigs` to the package download URL, e.g.:
@@ -48,15 +49,22 @@ the plugin:
 2. **Reads the local archive** from the conda package cache.
 
 3. **Verifies the bundle** using the embedded GitHub Actions trusted root (no additional
-   network call required). The in-toto statement inside the DSSE envelope must name the
-   package file and its SHA-256 digest as a subject, binding the attestation to the exact
-   archive being installed.
+   network call required).
 
-4. **Blocks the install** and reports a `CondaVerificationError` if all bundles for a package
+4. **Cross-checks the in-toto statement** inside the bundle against the actual package
+   per [CEP-0027](https://conda.org/learn/ceps/cep-0027):
+   - The predicate type must be `https://schemas.conda.org/attestations-publish-1.schema.json`
+   - The subject filename must match the package being installed
+   - The subject SHA-256 digest must match the downloaded archive
+   - The `targetChannel` must match the channel the package was retrieved from
+
+5. **Blocks the install** and reports a `CondaVerificationError` if all bundles for a package
    fail verification, or if no attestation is available and the plugin is configured in strict
    mode (the default).
 
-Packages from other channels (e.g. `conda-forge`) are silently skipped.
+Packages from channels not listed in `sigstore_trusted_channels` are silently skipped because
+we assume the user does not want this feature enabled for it. Additionally, support for this
+feature is currently very limited, so most channels will not be able to support it.
 
 ## Configuration
 
@@ -105,16 +113,41 @@ plugins:
   sigstore_issuer: null
 ```
 
-The default accepts only GitHub Actions-issued certificates, which is correct for the
-`github-releases` channel. Setting this to `null` disables issuer checking and is not
-recommended in production.
+The default accepts only GitHub Actions-issued certificates. Setting this to `null` disables
+issuer checking and is not recommended in production.
+
+---
+
+### `sigstore_trusted_channels`
+
+The list of channel base URLs for which Sigstore attestations are required. Only packages
+downloaded from one of these channels will be verified; all other packages are silently skipped.
+An empty list (the default) disables verification entirely.
+
+| | |
+|---|---|
+| **Type** | list of `str` |
+| **Default** | `[]` (verification disabled) |
+| **Env var** | `CONDA_PLUGINS_SIGSTORE_TRUSTED_CHANNELS` |
+
+**Example** — enable verification for `github-releases` on prefix.dev:
+
+```yaml
+# .condarc
+plugins:
+  sigstore_trusted_channels:
+    - https://prefix.dev/github-releases
+```
+
+The plugin uses conda's own `Channel` model to parse and compare URLs, so trailing slashes and
+minor URL variations are normalised automatically.
 
 ---
 
 ### `sigstore_on_missing`
 
-Controls what happens when a package from the `github-releases` channel has no attestation
-(the `.v0.sigs` endpoint returns a 404 or an empty array).
+Controls what happens when a package from a trusted channel has no attestation (the `.v0.sigs`
+endpoint returns a 404 or an empty array).
 
 | | |
 |---|---|
@@ -151,6 +184,8 @@ channels:
   - conda-forge
 
 plugins:
+  sigstore_trusted_channels:
+    - https://prefix.dev/github-releases
   sigstore_identity: "https://github.com/hunger/octoconda/.github/workflows/octoconda.yaml@refs/heads/main"
   sigstore_issuer: "https://token.actions.githubusercontent.com"
   sigstore_on_missing: block
