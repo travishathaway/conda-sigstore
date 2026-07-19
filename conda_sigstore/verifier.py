@@ -60,7 +60,7 @@ import hashlib
 import requests.exceptions
 from conda.base.context import context
 from conda.core.path_actions import Action
-from conda.exceptions import CondaVerificationError
+from conda.exceptions import CondaVerificationError, CondaError
 from conda.gateways.connection.session import get_session
 from conda.models.channel import Channel
 from py_sigstore import Bundle, Identity, VerificationError, Verifier
@@ -77,7 +77,7 @@ log = logging.getLogger(__name__)
 CONDA_PREDICATE_TYPE = "https://schemas.conda.org/attestations-publish-1.schema.json"
 
 
-class AttestationFetchError(Exception):
+class AttestationFetchError(CondaError):
     """Raised when the ``.v0.sigs`` endpoint cannot be reached or returns an
     unexpected HTTP status code."""
 
