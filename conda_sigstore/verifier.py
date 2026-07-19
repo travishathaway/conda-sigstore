@@ -377,7 +377,7 @@ class SigstoreVerificationAction(Action):
         on_missing: str = plugins.sigstore_on_missing
 
         trusted: set[str | None] = {
-            Channel.from_url(ch).base_url for ch in plugins.sigstore_trusted_channels
+            Channel(ch).base_url for ch in plugins.sigstore_trusted_channels
         }
 
         # Build the verifier once using the production Sigstore TUF root, which

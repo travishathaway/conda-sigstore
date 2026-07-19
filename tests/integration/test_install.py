@@ -14,7 +14,7 @@ from conda.base.context import reset_context
 from conda.exceptions import CondaError
 
 TRUSTED_CHANNEL = "https://prefix.dev/github-releases"
-CONDA_FORGE_CHANNEL = "https://conda.anaconda.org/conda-forge"
+CONDA_FORGE_CHANNEL = "conda-forge"
 TEST_PACKAGE = "asciinema"
 
 pytestmark = pytest.mark.integration
